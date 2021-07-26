@@ -1,8 +1,8 @@
 {
-  "name": "cdk-workshop",
+  "name": "trino-app",
   "version": "0.1.0",
   "bin": {
-    "cdk-workshop": "bin/cdk-workshop.js"
+    "app": "bin/cdk-app.js"
   },
   "scripts": {
     "build": "tsc",
