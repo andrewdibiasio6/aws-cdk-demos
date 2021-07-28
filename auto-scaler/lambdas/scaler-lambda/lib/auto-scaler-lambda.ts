@@ -3,14 +3,26 @@ import {
   APIGatewayProxyResult 
 } from "aws-lambda";
 
-import { EC2Client, DescribeInstancesCommand, StopInstancesCommand, InstanceStateName } from "@aws-sdk/client-ec2";
+import { EC2Client, DescribeInstancesCommand, StopInstancesCommand } from "@aws-sdk/client-ec2";
 
+import axios from 'axios';
 
+const slackUrl = 'https://hooks.slack.com/services/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';
 
-export const lambdaHandler = async (
-  event: APIGatewayProxyEvent
-): Promise<APIGatewayProxyResult> => {
-  console.log("test")
+async function postToSlack(url: string, body: string): Promise<void>{
+  try {
+    await axios({
+     method: 'post',
+     url: url,
+     data: {"text": body}
+   });
+ } catch (exception) {
+     //TODO: handle this better
+     process.stderr.write(`ERROR received from ${url}: ${exception}\n`);
+ }
+}
+
+export const lambdaHandler = async (): Promise<APIGatewayProxyResult> => {
 
   const client = new EC2Client({
     region: "us-west-1"
@@ -73,12 +85,24 @@ export const lambdaHandler = async (
 
   } catch (error) {
     console.log(error);
+    const response = {
+      statusCode: 500,
+      body: "Failed to run lambda scaler"
+    };
+    postToSlack(slackUrl, "Failed to run lambda scaler")
+    return response;
   } finally {
     // finally.
   }
-  
-  return {
+
+  const message = `Successfully ran lambda scaler, instancesToStopped: ${instancesToStop}`;
+
+  postToSlack(slackUrl, message);
+
+  const response = {
     statusCode: 200,
-    body: JSON.stringify({instancesToStop: instancesToStop})
+    body: JSON.stringify({message: message})
   }
+  return response;
 }
+
