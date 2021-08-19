@@ -1,9 +1,8 @@
 import { 
-  APIGatewayProxyEvent, 
   APIGatewayProxyResult 
 } from "aws-lambda";
 
-import { EC2Client, DescribeInstancesCommand, StopInstancesCommand } from "@aws-sdk/client-ec2";
+import { EC2Client, DescribeInstancesCommand, StopInstancesCommand, CreateTagsCommand } from "@aws-sdk/client-ec2";
 
 import axios from 'axios';
 
@@ -78,7 +77,18 @@ export const lambdaHandler = async (): Promise<APIGatewayProxyResult> => {
     const stopCommand = new StopInstancesCommand({InstanceIds: instancesToStop});
     console.log(`Stopping instances: ${instancesToStop}`);
     const stopCommandResponse = await client.send(stopCommand);
-    console.log(`Stopped instances: ${stopCommandResponse.StoppingInstances}`);  
+    console.log(`Stopped instances: ${stopCommandResponse.StoppingInstances}`);
+
+    const tagCommand = new CreateTagsCommand({
+      Resources: instancesToStop,
+      Tags: [{
+        Key: "StoppedByAutomationManagement", 
+        Value: Date.now().toString(),
+      }]
+    });
+
+    const tagCommandResponse = await client.send(tagCommand);
+    console.log(`Tagged instances: ${tagCommandResponse}`);
   } else {
     console.log(`No valid instances to stop`);
   }
