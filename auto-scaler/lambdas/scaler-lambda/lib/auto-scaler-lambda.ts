@@ -6,6 +6,7 @@ import { EC2Client, DescribeInstancesCommand, StopInstancesCommand, CreateTagsCo
 
 import axios from 'axios';
 
+//TODO: Update and Remove this, should not be in code base 
 const slackUrl = 'https://hooks.slack.com/services/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';
 
 async function postToSlack(url: string, body: string): Promise<void>{
