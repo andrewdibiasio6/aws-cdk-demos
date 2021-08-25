@@ -21,7 +21,7 @@ export class AutoScalerStack extends cdk.Stack {
 
     lambdaFunction.addToRolePolicy(new iam.PolicyStatement({
       resources: ['*'],
-      actions: ['ec2:DescribeInstances', 'ec2:CreateTags', 'ec2:DeleteTags'],
+      actions: ['ec2:DescribeInstances', 'ec2:CreateTags', 'ec2:DeleteTags', 'autoscaling:CreateOrUpdateTags', 'autoscaling:DescribeAutoScalingGroups', 'autoscaling:UpdateAutoScalingGroup'],
     }));
 
     //TODO: Add a tag condition like so https://docs.aws.amazon.com/IAM/latest/UserGuide/access_tags.html
@@ -31,7 +31,7 @@ export class AutoScalerStack extends cdk.Stack {
     }));
 
     const rule = new events.Rule(this, 'Schedule Rule', {
-      schedule: events.Schedule.cron({ minute: '*/5'}),
+      schedule: events.Schedule.cron({ minute: '5'}),
     });
 
     rule.addTarget(new targets.LambdaFunction(lambdaFunction));
