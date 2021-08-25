@@ -2,12 +2,23 @@ import {
   APIGatewayProxyResult 
 } from "aws-lambda";
 
-import { EC2Client, DescribeInstancesCommand, StopInstancesCommand, CreateTagsCommand } from "@aws-sdk/client-ec2";
+import { EC2Client, DescribeInstancesCommand, StopInstancesCommand, CreateTagsCommand, Tag } from "@aws-sdk/client-ec2";
 
 import axios from 'axios';
 
 //TODO: Update and Remove this, should not be in code base 
 const slackUrl = 'https://hooks.slack.com/services/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';
+
+function existsInMap(tag: Tag, map: Map<String, Set<String>>): boolean {
+  if(tag.Key != undefined && tag.Value != undefined){
+    let values = map.get(tag.Key);
+
+    if(values != undefined) {
+      return values.has(tag.Value);
+    }
+  }
+  return false;  
+}
 
 async function postToSlack(url: string, body: string): Promise<void>{
   try {
@@ -30,6 +41,10 @@ export const lambdaHandler = async (): Promise<APIGatewayProxyResult> => {
   const describeCommand = new DescribeInstancesCommand({});
 
   const instancesToStop: string[] = [];
+
+  const tagsToNotStop: Map<String, Set<String>> = new Map([
+    ["environment", new Set(['prod', 'demo'])],
+]); 
 
   // async/await.
   try {
@@ -58,8 +73,8 @@ export const lambdaHandler = async (): Promise<APIGatewayProxyResult> => {
                   console.log(`Instance ${instance.InstanceId} is managed by an ASG, skipping.`);
                   stopInstanceFlag = false;
                 }
-                else if(tag.Key ==  "LONG_RUNNING") {
-                  console.log(`Instance ${instance.InstanceId} is tagged LONG_RUNNING, skipping.`);
+                else if(existsInMap(tag, tagsToNotStop)) {
+                  console.log(`Instance ${instance.InstanceId} is tagged ${tag}, skipping.`);
                   stopInstanceFlag = false;
                 }
               });
