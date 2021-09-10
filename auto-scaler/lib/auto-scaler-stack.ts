@@ -21,7 +21,11 @@ export class AutoScalerStack extends cdk.Stack {
 
     lambdaFunction.addToRolePolicy(new iam.PolicyStatement({
       resources: ['*'],
-      actions: ['ec2:DescribeInstances', 'ec2:CreateTags', 'ec2:DeleteTags', 'autoscaling:CreateOrUpdateTags', 'autoscaling:DescribeAutoScalingGroups', 'autoscaling:UpdateAutoScalingGroup'],
+      actions: [
+        'ec2:DescribeInstances', 'ec2:CreateTags', 'ec2:DeleteTags', 
+        'autoscaling:CreateOrUpdateTags', 'autoscaling:DescribeAutoScalingGroups', 'autoscaling:UpdateAutoScalingGroup', 
+        'eks:DescribeCluster', 'eks:DescribeNodegroup', 'eks:ListClusters', 'eks:ListNodegroups', 'eks:TagResource', 'eks:UpdateNodegroupConfig'
+      ],
     }));
 
     //TODO: Add a tag condition like so https://docs.aws.amazon.com/IAM/latest/UserGuide/access_tags.html
