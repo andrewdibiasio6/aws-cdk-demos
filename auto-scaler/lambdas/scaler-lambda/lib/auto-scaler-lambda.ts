@@ -2,11 +2,14 @@ import {
   APIGatewayProxyResult 
 } from "aws-lambda";
 
-import { EC2Client, DescribeInstancesCommand, StopInstancesCommand, CreateTagsCommand, Tag } from "@aws-sdk/client-ec2";
-import { AutoScalingClient, DescribeAutoScalingGroupsCommand, UpdateAutoScalingGroupCommand, CreateOrUpdateTagsCommand } from "@aws-sdk/client-auto-scaling";
-import { EKSClient, DescribeClusterCommand, DescribeNodegroupCommand, ListNodegroupsCommand, ListClustersCommand, TagResourceCommand, UpdateNodegroupConfigCommand, Cluster} from "@aws-sdk/client-eks";
-import { ECRClient, DescribeRepositoriesCommand, DeleteRepositoryCommand, ListImagesCommand, BatchDeleteImageCommand} from "@aws-sdk/client-ecr";
-import { DescribeVpcsCommand, DeleteVpcCommand } from "@aws-sdk/client-ec2";
+import { EC2Client, DescribeInstancesCommand, Tag, DescribeVolumesCommand } from "@aws-sdk/client-ec2";
+import { AutoScalingClient, DescribeAutoScalingGroupsCommand } from "@aws-sdk/client-auto-scaling";
+import { EKSClient, DescribeClusterCommand, ListClustersCommand, Cluster} from "@aws-sdk/client-eks";
+import { DescribeVpcsCommand } from "@aws-sdk/client-ec2";
+import { S3Client, ListBucketsCommand, GetBucketTaggingCommand} from "@aws-sdk/client-s3";
+import { RDSClient, DescribeDBInstancesCommand, DescribeDBSnapshotsCommand } from "@aws-sdk/client-rds";
+import { CloudFormationClient, ListStacksCommand, DescribeStacksCommand } from "@aws-sdk/client-cloudformation";
+import { RegionInfo } from '@aws-cdk/region-info';
 
 import axios from 'axios';
 
@@ -17,6 +20,10 @@ const tagsToNotStop: Map<String, Set<String>> = new Map([
   ["environment", new Set(['prod', 'demo'])],
 ]); 
 
+// function delay(ms: number) {
+//   return new Promise( resolve => setTimeout(resolve, ms) );
+// }
+
 function existsInMap(tag: Tag, map: Map<String, Set<String>>): boolean {
   if(tag.Key != undefined && tag.Value != undefined){
     let values = map.get(tag.Key);
@@ -26,6 +33,23 @@ function existsInMap(tag: Tag, map: Map<String, Set<String>>): boolean {
     }
   }
   return false;  
+}
+
+function isTagMissing(tags: Tag[] | undefined, keys: Set<string>): boolean {
+  if(tags == undefined){
+    return true;
+  }
+
+  let keyFound = false;
+
+  tags.forEach(tag => {
+    if(tag.Key != undefined && tag.Value != undefined){
+      if(keys.has(tag.Key)){
+        keyFound = true;
+      }
+    }
+  });
+  return !keyFound;  
 }
 
 async function postToSlack(url: string, body: string): Promise<void>{
@@ -41,9 +65,9 @@ async function postToSlack(url: string, body: string): Promise<void>{
  }
 }
 
-async function manageEKSClusters(): Promise<string[]>{
+async function manageEKSClusters(region: string): Promise<string[]>{
   console.log(`Managing EKS Clusters...`);
-  const client = new EKSClient({region: "us-west-1"});
+  const client = new EKSClient({region: region});
   const command = new ListClustersCommand({});
   const listClusterCommandResponse = await client.send(command);
   const clustersToManage: Cluster[] = [];
@@ -67,11 +91,8 @@ async function manageEKSClusters(): Promise<string[]>{
     
     if(describeClusterCommandResponse.cluster != undefined && describeClusterCommandResponse.cluster.tags != undefined) {       
       for (const key in describeClusterCommandResponse.cluster.tags) {
-        if (tagsToNotStop.has(key) ) {
-          if(tagsToNotStop.get(key)?.has(describeClusterCommandResponse.cluster.tags[key])){
-            console.log(`Cluster ${clusterName} is tagged ${key}|${describeClusterCommandResponse.cluster.tags[key]}, skipping.`);
-            manageCluster = false;
-          }
+        if (key == "environment") {
+          manageCluster = false;
         }
       }
 
@@ -86,57 +107,8 @@ async function manageEKSClusters(): Promise<string[]>{
       const cluster = clustersToManage[i];
       console.log(`Managing Cluster: ${cluster.name}`);
 
-      const listNodegroupsCommand = new ListNodegroupsCommand({
-        clusterName: cluster.name,
-      });
-
-      const listNodegroupsResponse = await client.send(listNodegroupsCommand);  
-
-      if(listNodegroupsResponse.nodegroups == undefined){
-        console.log(`No node groups for cluster: ${cluster}, nothing to scale down.`);
-        continue;
-      } 
-
-      let wasScaledDown = false;
-      for (let j = 0; j < listNodegroupsResponse.nodegroups.length; j++) {
-        const nodeGroupName = listNodegroupsResponse.nodegroups[j];
-        const describeNodegroupCommand = new DescribeNodegroupCommand({
-          nodegroupName: nodeGroupName,
-          clusterName: cluster.name,
-        });
-
-        const describeNodegroupResponse = await client.send(describeNodegroupCommand);
-
-        if(describeNodegroupResponse.nodegroup?.scalingConfig?.desiredSize != 0){
-          const updateNodegroupCommand = new UpdateNodegroupConfigCommand({
-            nodegroupName: nodeGroupName,
-            clusterName: cluster.name,
-            scalingConfig: {
-              desiredSize: 0,
-              maxSize: 1,
-              minSize: 0
-            },
-          });
-    
-          const updateNodegroupResponse = await client.send(updateNodegroupCommand);
-          wasScaledDown = true;
-        }
-      }
-
-      if(wasScaledDown){
-        const tagResourceCommand = new TagResourceCommand({
-          resourceArn: cluster.arn,
-          tags: {
-            "ManagedByAutomation": new Date().toString(),
-          }
-        });
-
-        await client.send(tagResourceCommand);
-        console.log(`Scaled down cluster: ${cluster.name}`);
-
-        if(cluster.name != undefined){
-          clustersScaledDown.push(cluster.name);
-        }
+      if(cluster.name != undefined){
+        clustersScaledDown.push(cluster.name);
       }
     }
   } else {
@@ -146,9 +118,9 @@ async function manageEKSClusters(): Promise<string[]>{
   return clustersScaledDown;
 };
 
-async function manageAutoScalingGroups(): Promise<string[]>{
+async function manageAutoScalingGroups(region: string): Promise<string[]>{
     console.log(`Managing ASGs...`);
-    const client = new AutoScalingClient({region: "us-west-1"});
+    const client = new AutoScalingClient({region: region});
     const command = new DescribeAutoScalingGroupsCommand({});
     const describeCommandResponse = await client.send(command);
     const asgsToManage: string[] = [];
@@ -163,15 +135,9 @@ async function manageAutoScalingGroups(): Promise<string[]>{
 
     describeCommandResponse.AutoScalingGroups.forEach(asg => {
       let manageASG = true;
-      if(asg.Tags != undefined) { 
-        asg.Tags.forEach(tag => {
-          if(tag.Key == "eks:cluster-name" || existsInMap(tag, tagsToNotStop)){
-            console.log(`Instance ${asg.AutoScalingGroupName} is tagged ${tag.Key}|${tag.Value}, skipping.`);
-            manageASG = false;
-          } else if(asg.DesiredCapacity == 0){
-            manageASG = false;
-          }
-        });
+
+      if(!isTagMissing(asg.Tags, new Set("environment"))){
+        manageASG = false;
       }
 
       if(manageASG && asg.AutoScalingGroupName != undefined) {
@@ -179,46 +145,17 @@ async function manageAutoScalingGroups(): Promise<string[]>{
       }
     });
 
-    if(asgsToManage.length > 0){
-      console.log(`Scaling down ASGs: ${asgsToManage}`);
-      
-      for (let index = 0; index < asgsToManage.length; index++) {
-        const asgName = asgsToManage[index];
-        const updateAutoScalingGroupCommand = new UpdateAutoScalingGroupCommand({
-          AutoScalingGroupName: asgName,
-          MinSize: 0,
-          MaxSize: 1,
-          DesiredCapacity: 0,
-        });
-        await client.send(updateAutoScalingGroupCommand);   
-
-        const tagCommand = new CreateOrUpdateTagsCommand({
-          Tags: [{
-            ResourceId: asgName,
-            ResourceType: "auto-scaling-group",
-            PropagateAtLaunch: false,
-            Key: "ManagedByAutomation", 
-            Value: new Date().toString(),
-          }]
-        });
-        await client.send(tagCommand);
-
-        console.log(`Scaled down ASG: ${asgName}`);
-      }
-    } else {
-      console.log(`No valid ASGs to manage`);
-    }
     return asgsToManage;
 }
 
-async function manageEC2(): Promise<string[]>{
+async function manageEC2(region: string): Promise<string[]>{
   console.log(`Managing EC2...`);
   const client = new EC2Client({
-    region: "us-west-1"
+    region: region
   });
   const describeCommand = new DescribeInstancesCommand({});
 
-  const instancesToStop: string[] = [];
+  const untaggedInstances: string[] = [];
 
   // async/await.
 
@@ -237,95 +174,217 @@ async function manageEC2(): Promise<string[]>{
   describeCommandResponse.Reservations.forEach(reservation => {
     if(reservation.Instances != undefined) {
       reservation.Instances.forEach(instance => {
-        let stopInstanceFlag = true;
-        if(instance.State?.Name == "running"){
-          if(instance.Tags != undefined) { 
-            instance.Tags.forEach(tag => {
-              if(tag.Key == "aws:autoscaling:groupName" || existsInMap(tag, tagsToNotStop)){
-                console.log(`Instance ${instance.InstanceId} is tagged ${tag}, skipping.`);
-                stopInstanceFlag = false;
-              }
-            });
-          } 
-        } else {
-          stopInstanceFlag = false;
-        }
-        if(stopInstanceFlag && instance.InstanceId != undefined) {
-          instancesToStop.push(instance.InstanceId);
+        let untaggedInstanceFlag = true;
+
+        if(instance.Tags != undefined) { 
+          instance.Tags.forEach(tag => {
+            if(tag.Key == "aws:autoscaling:groupName" || !isTagMissing([tag], new Set("environment"))){
+              console.log(`Instance ${instance.InstanceId} is tagged ${tag}, skipping.`);
+              untaggedInstanceFlag = false;
+            }
+          });
+        } 
+        
+        if(untaggedInstanceFlag && instance.InstanceId != undefined) {
+          untaggedInstances.push(instance.InstanceId);
         }
       });
     }
   });
 
-  if(instancesToStop.length > 0){
-    const stopCommand = new StopInstancesCommand({InstanceIds: instancesToStop});
-    console.log(`Stopping instances: ${instancesToStop}`);
-    const stopCommandResponse = await client.send(stopCommand);
-
-    const tagCommand = new CreateTagsCommand({
-      Resources: instancesToStop,
-      Tags: [{
-        Key: "ManagedByAutomation", 
-        Value: new Date().toString(),
-      }]
-    });
-
-    const tagCommandResponse = await client.send(tagCommand);
-  } else {
-    console.log(`No valid instances to stop`);
-  }
-
-  return instancesToStop;
+  return untaggedInstances;
 };
 
 export const lambdaHandler = async (): Promise<APIGatewayProxyResult> => {
+  let fullMessage = ``;
+
   try {
-    ["us-east-1", "us-east-2", "us-west-1", "us-west-2"].forEach(async r => {
-      const client = new ECRClient({region: r});
-      const command = new DescribeRepositoriesCommand({});
-      const responsex = await client.send(command);
-      responsex.repositories?.forEach(async element => {
+    fullMessage += await Promise.all(RegionInfo.regions.map(async (regionInfo) => {
+      let message = '';
+      const r = regionInfo.name;
+      
+      if(r.startsWith("af") || r.startsWith("ap") || r.startsWith("me") || r.startsWith("sa") 
+      || r.startsWith("cn") || r.startsWith("eu-south-1") || r.startsWith("us-gov") || r.startsWith("us-iso")
+      ){
+        return message;
+      }
 
-        const commanda = new ListImagesCommand({repositoryName: element.repositoryName});
-        const responsea = await client.send(commanda); 
-
-        const commandb = new BatchDeleteImageCommand({repositoryName: element.repositoryName, imageIds: responsea.imageIds });
-        const responseb = await client.send(commandb);
-        
-        const commandc = new DeleteRepositoryCommand({repositoryName: element.repositoryName});
-        const responsec = await client.send(commandc);
-      });
-
+      console.log(r);
+      
+      message += `\n${r}`;
 
       const client2 = new EC2Client({region: r});
       const commandd = new DescribeVpcsCommand({});
       const responsed = await client2.send(commandd);
 
-      responsed.Vpcs?.forEach(async vpc => {
-        if(vpc.IsDefault == false){
-          try{
-            const commande = new DeleteVpcCommand({VpcId: vpc.});
-            const responsee = await client2.send(commande);
-          }catch (error) {
-            console.log("cant delete vpc");
-          }
-        }
-      });
-    });
+      let untaggedVPCs: String[] = [];
 
-    const clustersScaledDown = await manageEKSClusters();
-    const asgScaledDown = await manageAutoScalingGroups();
-    const stoppedInstances = await manageEC2();
-    const message = `Successfully ran automated resource management.
-    \nClusters scaled down: ${clustersScaledDown}
-    \nASGs scaled down: ${asgScaledDown}
-    \nInstances stopped: ${stoppedInstances}`;
+      if(responsed.Vpcs != undefined){
+        for (const vpc of responsed.Vpcs) {
+          if(vpc.IsDefault == false){
+            try{
+              if(isTagMissing(vpc.Tags, new Set("environment"))){
+                if(vpc.VpcId != undefined){
+                  untaggedVPCs.push(vpc.VpcId);
+                }
+              }
+            }catch (error) {
+              console.log("cant delete vpc");
+            }
+          }
+        };
+      }
+
+      message += `\n\tUntagged VPCs: ${untaggedVPCs}`;
+
+      ///////////////////////////
+
+      const untaggedInstances = await manageEC2(r);
+
+      message += `\n\tUntagged EC2 instances: ${untaggedInstances}`;
+
+      const untaggedEKS = await manageEKSClusters(r);
+
+      message += `\n\tUntagged EKS clusters: ${untaggedEKS}`;
+
+      const untaggedASG = await manageAutoScalingGroups(r);
+
+      message += `\n\tUntagged ASG clusters: ${untaggedASG}`;
+
+      ///////////
+
+      const untaggedBuckets: string[] = [];
+      const clientS3 = new S3Client({region: r});
+      const s3ListCommand = new ListBucketsCommand({});
+      const s3ListResponse = await clientS3.send(s3ListCommand);
+
+      if(s3ListResponse.Buckets != undefined){
+        for (const bucket of s3ListResponse.Buckets) {
+          try{
+            const getObjectTaggingCommand = new GetBucketTaggingCommand({Bucket: bucket.Name});
+            const tagResponse = await clientS3.send(getObjectTaggingCommand);
+            if(isTagMissing(tagResponse.TagSet,  new Set("environment"))){
+              if(bucket.Name != undefined){
+                untaggedBuckets.push(bucket.Name);
+              }
+            }
+          } catch(error) {
+            //Just eating this error for now 
+          }
+        };
+      }
+
+      message += `\n\tUntagged buckets: ${untaggedBuckets}`;
+
+      //////////////////
+
+      ///////////
+
+      const untaggedVolumes: string[] = [];
+      const clientEC2 = new EC2Client({region: r});
+      const describeVolumesCommand = new DescribeVolumesCommand({Filters: [{Name: "status", Values: ["available"]}]});
+      const describeVolumesResponse = await clientEC2.send(describeVolumesCommand);
+
+      if(describeVolumesResponse.Volumes != undefined){
+        for (const volume of describeVolumesResponse.Volumes) {
+          try{
+            if(isTagMissing(volume.Tags,  new Set("environment"))){
+              if(volume.VolumeId != undefined){
+                untaggedVolumes.push(volume.VolumeId);
+              }
+            }
+          } catch(error) {
+            //Just eating this error for now 
+          }
+        };
+      }
+
+      message += `\n\tUntagged volumes: ${untaggedVolumes}`;
+
+      //////////////////
+
+      const untaggedRDS: string[] = [];
+      const untaggedSnap: string[] = [];
+      const clientRDS = new RDSClient({region: r});
+      const rdsListCommand = new DescribeDBInstancesCommand({});
+      const rdsListResponse = await clientRDS.send(rdsListCommand);
+
+      if(rdsListResponse.DBInstances != undefined){
+        for (const db of rdsListResponse.DBInstances) {
+          if(isTagMissing(db.TagList,  new Set("environment"))){
+            if(db.DBName != undefined){
+              untaggedRDS.push(db.DBName);
+            }
+            else if(db.DBInstanceIdentifier != undefined){
+              untaggedRDS.push(db.DBInstanceIdentifier);
+            }
+          }
+  
+          const rdsDescribeDBSnapshotsCommand = new DescribeDBSnapshotsCommand({DBInstanceIdentifier: db.DBInstanceIdentifier});
+          const rdsDescribeDBSnapshotsResponse = await clientRDS.send(rdsDescribeDBSnapshotsCommand);
+
+          if(rdsDescribeDBSnapshotsResponse.DBSnapshots != undefined) {
+            for (const snapshot of rdsDescribeDBSnapshotsResponse.DBSnapshots) {
+              if(isTagMissing(snapshot.TagList,  new Set("environment"))){
+                if(snapshot.DBSnapshotIdentifier != undefined){
+                  untaggedSnap.push(snapshot.DBSnapshotIdentifier);
+                } else if (snapshot.DBSnapshotArn != undefined){
+                  untaggedSnap.push(snapshot.DBSnapshotArn);
+                }
+              }
+            };
+          }
+        };
+      }
+
+      message += `\n\tUntagged RDS DBs: ${untaggedRDS}`;
+      message += `\n\tUntagged RDS snapshots: ${untaggedSnap}`;
+
+      //////////////////
+
+      const untaggedStacks: string[] = [];
+      const clientCFN = new CloudFormationClient({region: r});
+      const listStacksCommand = new ListStacksCommand({StackStatusFilter: [
+      'CREATE_IN_PROGRESS',  'CREATE_COMPLETE', 
+      'ROLLBACK_IN_PROGRESS', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE', 'DELETE_FAILED', 
+      'UPDATE_IN_PROGRESS', 'UPDATE_COMPLETE_CLEANUP_IN_PROGRESS', 'UPDATE_COMPLETE', 
+      'UPDATE_FAILED', 'UPDATE_ROLLBACK_IN_PROGRESS', 'UPDATE_ROLLBACK_FAILED', 'UPDATE_ROLLBACK_COMPLETE', 
+      'REVIEW_IN_PROGRESS', 'IMPORT_IN_PROGRESS', 'IMPORT_COMPLETE', 'IMPORT_ROLLBACK_IN_PROGRESS', 
+      'IMPORT_ROLLBACK_FAILED', 'IMPORT_ROLLBACK_COMPLETE']});
+
+      const listStacksResponse = await clientCFN.send(listStacksCommand);
+
+      if(listStacksResponse.StackSummaries != undefined){
+        for (const stackSummary of listStacksResponse.StackSummaries ) {
+          try {
+            const describeStacksCommand = new DescribeStacksCommand({StackName: stackSummary.StackName});
+            const describeStacksResponse = await clientCFN.send(describeStacksCommand);
+  
+            describeStacksResponse.Stacks?.forEach(stack => {
+              if(isTagMissing(stack.Tags,  new Set("environment"))){
+                if(stack.StackName != undefined){
+                  untaggedStacks.push(stack.StackName);
+                }
+              }
+            });
+          } catch(error){
+            console.log(error);
+          }
+        };
+  
+        message += `\n\tUntagged Stacks: ${untaggedStacks.toString()}`;
+      }
+
+      return message;
+    }));
     
-    await postToSlack(slackUrl, message);
+    // await postToSlack(slackUrl, message);
+
+    console.log(fullMessage);
 
     const response = {
       statusCode: 200,
-      body: JSON.stringify({message: message})
+      body: JSON.stringify({message: fullMessage})
     }
     return response;
   } catch (error) {

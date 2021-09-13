@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@aws-cdk/core": "1.115.0",
+    "@aws-sdk/client-ebs": "^3.31.0",
     "@aws-sdk/client-ec2": "^3.23.0",
     "@aws-sdk/client-ecr": "^3.30.0",
     "@aws-sdk/client-eks": "^3.29.0",
