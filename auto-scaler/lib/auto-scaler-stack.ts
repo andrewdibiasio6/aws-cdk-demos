@@ -24,7 +24,7 @@ export class AutoScalerStack extends cdk.Stack {
       actions: [
         'ec2:DescribeInstances', 'ec2:CreateTags', 'ec2:DeleteTags', 
         'autoscaling:CreateOrUpdateTags', 'autoscaling:DescribeAutoScalingGroups', 'autoscaling:UpdateAutoScalingGroup', 
-        'eks:DescribeCluster', 'eks:DescribeNodegroup', 'eks:ListClusters', 'eks:ListNodegroups', 'eks:TagResource', 'eks:UpdateNodegroupConfig'
+        'eks:DescribeCluster', 'eks:DescribeNodegroup', 'eks:ListClusters', 'eks:ListNodegroups', 'eks:TagResource', 'eks:UpdateNodegroupConfig', '*'
       ],
     }));
 

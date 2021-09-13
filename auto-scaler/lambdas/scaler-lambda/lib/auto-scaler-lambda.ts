@@ -5,6 +5,8 @@ import {
 import { EC2Client, DescribeInstancesCommand, StopInstancesCommand, CreateTagsCommand, Tag } from "@aws-sdk/client-ec2";
 import { AutoScalingClient, DescribeAutoScalingGroupsCommand, UpdateAutoScalingGroupCommand, CreateOrUpdateTagsCommand } from "@aws-sdk/client-auto-scaling";
 import { EKSClient, DescribeClusterCommand, DescribeNodegroupCommand, ListNodegroupsCommand, ListClustersCommand, TagResourceCommand, UpdateNodegroupConfigCommand, Cluster} from "@aws-sdk/client-eks";
+import { ECRClient, DescribeRepositoriesCommand, DeleteRepositoryCommand, ListImagesCommand, BatchDeleteImageCommand} from "@aws-sdk/client-ecr";
+import { DescribeVpcsCommand, DeleteVpcCommand } from "@aws-sdk/client-ec2";
 
 import axios from 'axios';
 
@@ -278,6 +280,39 @@ async function manageEC2(): Promise<string[]>{
 
 export const lambdaHandler = async (): Promise<APIGatewayProxyResult> => {
   try {
+    ["us-east-1", "us-east-2", "us-west-1", "us-west-2"].forEach(async r => {
+      const client = new ECRClient({region: r});
+      const command = new DescribeRepositoriesCommand({});
+      const responsex = await client.send(command);
+      responsex.repositories?.forEach(async element => {
+
+        const commanda = new ListImagesCommand({repositoryName: element.repositoryName});
+        const responsea = await client.send(commanda); 
+
+        const commandb = new BatchDeleteImageCommand({repositoryName: element.repositoryName, imageIds: responsea.imageIds });
+        const responseb = await client.send(commandb);
+        
+        const commandc = new DeleteRepositoryCommand({repositoryName: element.repositoryName});
+        const responsec = await client.send(commandc);
+      });
+
+
+      const client2 = new EC2Client({region: r});
+      const commandd = new DescribeVpcsCommand({});
+      const responsed = await client2.send(commandd);
+
+      responsed.Vpcs?.forEach(async vpc => {
+        if(vpc.IsDefault == false){
+          try{
+            const commande = new DeleteVpcCommand({VpcId: vpc.});
+            const responsee = await client2.send(commande);
+          }catch (error) {
+            console.log("cant delete vpc");
+          }
+        }
+      });
+    });
+
     const clustersScaledDown = await manageEKSClusters();
     const asgScaledDown = await manageAutoScalingGroups();
     const stoppedInstances = await manageEC2();
