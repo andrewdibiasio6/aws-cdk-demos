@@ -5,14 +5,18 @@ import {
 import { EC2Client, DescribeInstancesCommand, StopInstancesCommand, CreateTagsCommand, Tag } from "@aws-sdk/client-ec2";
 import { AutoScalingClient, DescribeAutoScalingGroupsCommand, UpdateAutoScalingGroupCommand, CreateOrUpdateTagsCommand } from "@aws-sdk/client-auto-scaling";
 import { EKSClient, DescribeClusterCommand, DescribeNodegroupCommand, ListNodegroupsCommand, ListClustersCommand, TagResourceCommand, UpdateNodegroupConfigCommand, Cluster} from "@aws-sdk/client-eks";
+import { RDSClient, DescribeDBClustersCommand, StopDBClusterCommand, AddTagsToResourceCommand, DBCluster } from "@aws-sdk/client-rds";
+import { RegionInfo } from '@aws-cdk/region-info';
+import { HandlerEvent } from './handler-event'
+import { getCurrentDate } from './util'
 
 import axios from 'axios';
 
 //TODO: Update and Remove this, should not be in code base 
-const slackUrl = 'https://hooks.slack.com/services/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';
+// const slackUrl = 'https://hooks.slack.com/services/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';
 
 const tagsToNotStop: Map<String, Set<String>> = new Map([
-  ["environment", new Set(['prod', 'demo'])],
+  ["LIFECYCLE", new Set(['PERSISTENT'])],
 ]); 
 
 function existsInMap(tag: Tag, map: Map<String, Set<String>>): boolean {
@@ -39,9 +43,8 @@ async function postToSlack(url: string, body: string): Promise<void>{
  }
 }
 
-async function manageEKSClusters(): Promise<string[]>{
-  console.log(`Managing EKS Clusters...`);
-  const client = new EKSClient({region: "us-west-1"});
+async function manageEKSClusters(region: string): Promise<string[]>{
+  const client = new EKSClient({region: region});
   const command = new ListClustersCommand({});
   const listClusterCommandResponse = await client.send(command);
   const clustersToManage: Cluster[] = [];
@@ -67,7 +70,6 @@ async function manageEKSClusters(): Promise<string[]>{
       for (const key in describeClusterCommandResponse.cluster.tags) {
         if (tagsToNotStop.has(key) ) {
           if(tagsToNotStop.get(key)?.has(describeClusterCommandResponse.cluster.tags[key])){
-            console.log(`Cluster ${clusterName} is tagged ${key}|${describeClusterCommandResponse.cluster.tags[key]}, skipping.`);
             manageCluster = false;
           }
         }
@@ -82,7 +84,6 @@ async function manageEKSClusters(): Promise<string[]>{
   if(clustersToManage.length > 0){    
     for (let i = 0; i < clustersToManage.length; i++) {
       const cluster = clustersToManage[i];
-      console.log(`Managing Cluster: ${cluster.name}`);
 
       const listNodegroupsCommand = new ListNodegroupsCommand({
         clusterName: cluster.name,
@@ -91,7 +92,6 @@ async function manageEKSClusters(): Promise<string[]>{
       const listNodegroupsResponse = await client.send(listNodegroupsCommand);  
 
       if(listNodegroupsResponse.nodegroups == undefined){
-        console.log(`No node groups for cluster: ${cluster}, nothing to scale down.`);
         continue;
       } 
 
@@ -122,31 +122,32 @@ async function manageEKSClusters(): Promise<string[]>{
       }
 
       if(wasScaledDown){
-        const tagResourceCommand = new TagResourceCommand({
-          resourceArn: cluster.arn,
-          tags: {
-            "ManagedByAutomation": new Date().toString(),
-          }
-        });
+        try{
 
-        await client.send(tagResourceCommand);
-        console.log(`Scaled down cluster: ${cluster.name}`);
+          const tagResourceCommand = new TagResourceCommand({
+            resourceArn: cluster.arn,
+            tags: {
+              ManagedByAutomation: getCurrentDate(),
+            }
+          });
 
+          await client.send(tagResourceCommand);
+        }  catch (error) {
+          console.log(`Failed to tag eks cluster ${cluster.name} in region ${region}\n${error}`)
+        }
+        
         if(cluster.name != undefined){
           clustersScaledDown.push(cluster.name);
         }
       }
     }
-  } else {
-    console.log(`No valid clusters to manage`);
   }
 
   return clustersScaledDown;
 };
 
-async function manageAutoScalingGroups(): Promise<string[]>{
-    console.log(`Managing ASGs...`);
-    const client = new AutoScalingClient({region: "us-west-1"});
+async function manageAutoScalingGroups(region: string): Promise<string[]>{
+    const client = new AutoScalingClient({region: region});
     const command = new DescribeAutoScalingGroupsCommand({});
     const describeCommandResponse = await client.send(command);
     const asgsToManage: string[] = [];
@@ -164,7 +165,6 @@ async function manageAutoScalingGroups(): Promise<string[]>{
       if(asg.Tags != undefined) { 
         asg.Tags.forEach(tag => {
           if(tag.Key == "eks:cluster-name" || existsInMap(tag, tagsToNotStop)){
-            console.log(`Instance ${asg.AutoScalingGroupName} is tagged ${tag.Key}|${tag.Value}, skipping.`);
             manageASG = false;
           } else if(asg.DesiredCapacity == 0){
             manageASG = false;
@@ -177,9 +177,7 @@ async function manageAutoScalingGroups(): Promise<string[]>{
       }
     });
 
-    if(asgsToManage.length > 0){
-      console.log(`Scaling down ASGs: ${asgsToManage}`);
-      
+    if(asgsToManage.length > 0){      
       for (let index = 0; index < asgsToManage.length; index++) {
         const asgName = asgsToManage[index];
         const updateAutoScalingGroupCommand = new UpdateAutoScalingGroupCommand({
@@ -196,23 +194,18 @@ async function manageAutoScalingGroups(): Promise<string[]>{
             ResourceType: "auto-scaling-group",
             PropagateAtLaunch: false,
             Key: "ManagedByAutomation", 
-            Value: new Date().toString(),
+            Value: getCurrentDate(),
           }]
         });
         await client.send(tagCommand);
-
-        console.log(`Scaled down ASG: ${asgName}`);
       }
-    } else {
-      console.log(`No valid ASGs to manage`);
     }
     return asgsToManage;
 }
 
-async function manageEC2(): Promise<string[]>{
-  console.log(`Managing EC2...`);
+async function manageEC2(region: string): Promise<string[]>{
   const client = new EC2Client({
-    region: "us-west-1"
+    region: region
   });
   const describeCommand = new DescribeInstancesCommand({});
 
@@ -240,7 +233,6 @@ async function manageEC2(): Promise<string[]>{
           if(instance.Tags != undefined) { 
             instance.Tags.forEach(tag => {
               if(tag.Key == "aws:autoscaling:groupName" || existsInMap(tag, tagsToNotStop)){
-                console.log(`Instance ${instance.InstanceId} is tagged ${tag}, skipping.`);
                 stopInstanceFlag = false;
               }
             });
@@ -257,40 +249,173 @@ async function manageEC2(): Promise<string[]>{
 
   if(instancesToStop.length > 0){
     const stopCommand = new StopInstancesCommand({InstanceIds: instancesToStop});
-    console.log(`Stopping instances: ${instancesToStop}`);
     const stopCommandResponse = await client.send(stopCommand);
 
     const tagCommand = new CreateTagsCommand({
       Resources: instancesToStop,
       Tags: [{
         Key: "ManagedByAutomation", 
-        Value: new Date().toString(),
+        Value: getCurrentDate(),
       }]
     });
 
     const tagCommandResponse = await client.send(tagCommand);
-  } else {
-    console.log(`No valid instances to stop`);
   }
 
   return instancesToStop;
 };
 
-export const lambdaHandler = async (): Promise<APIGatewayProxyResult> => {
+async function manageRDS(region: string): Promise<string[]>{
+      const managedRDSClusters: DBCluster[] = [];
+      const managedRDSClustersNames: string[] = [];
+      const clientRDS = new RDSClient({region: region});
+      const rdsListCommand = new DescribeDBClustersCommand({});
+      const rdsListResponse = await clientRDS.send(rdsListCommand);
+
+      if(rdsListResponse.DBClusters != undefined){
+        for (const db of rdsListResponse.DBClusters) {
+          console.log(db)
+          if(db.Status != 'available'){
+            continue;
+          }
+
+          if(db.TagList != undefined && db.TagList.length != 0){
+            for(var tag of db.TagList) {
+              if(!existsInMap(tag,  tagsToNotStop)){
+                // if(db.DBName != undefined){
+                //   managedInstances.push(db.DBName);
+                // }
+                if(db.DBClusterIdentifier != undefined){
+                  managedRDSClusters.push(db);
+                }
+              }
+            };
+          } else {
+            if(db.DBClusterIdentifier != undefined){
+              managedRDSClusters.push(db);
+            }
+          }
+        };
+      };
+
+      console.log(managedRDSClusters);
+      
+      await Promise.all(managedRDSClusters.map(async cluster => {
+        try{
+          console.log(`Stopping cluster: ${cluster}`)
+          const rdsStopInstanceCommand = new StopDBClusterCommand({DBClusterIdentifier: cluster.DBClusterIdentifier});
+          await clientRDS.send(rdsStopInstanceCommand);
+
+          if(cluster.DBClusterIdentifier != undefined){
+            managedRDSClustersNames.push(cluster.DBClusterIdentifier)
+          }
+
+          if(cluster.DBClusterArn != undefined){
+            const rdsTagResourceCommand = new AddTagsToResourceCommand({
+              ResourceName: cluster.DBClusterArn,
+              Tags: [{
+                Key: "ManagedByAutomation", 
+                Value: getCurrentDate(),
+              }]
+            });
+
+            await clientRDS.send(rdsTagResourceCommand);
+          }
+        }  catch (error) {
+          console.log(`Failed to stop DB cluster: ${cluster}\n${error}`)
+        }
+      }));
+
+      return managedRDSClustersNames;
+}
+
+function isRegionMatch(event: HandlerEvent | undefined, regionName: String): boolean {
+  if(event == undefined){
+    return true;
+  }
+
+  if(event.regionPrefixes == undefined || event.regionPrefixes.length == 0){
+    return true;
+  }
+
+  for (const prefix of event.regionPrefixes) {
+    if(regionName.startsWith(prefix)){
+      return true;
+    }
+  }
+
+  return false;
+}
+
+
+export const lambdaHandler = async (event: HandlerEvent | undefined): Promise<APIGatewayProxyResult> => {
+  let fullMessage = ``;
+  console.log(event);
+
   try {
-    const clustersScaledDown = await manageEKSClusters();
-    const asgScaledDown = await manageAutoScalingGroups();
-    const stoppedInstances = await manageEC2();
-    const message = `Successfully ran automated resource management.
-    \nClusters scaled down: ${clustersScaledDown}
-    \nASGs scaled down: ${asgScaledDown}
-    \nInstances stopped: ${stoppedInstances}`;
-    
-    await postToSlack(slackUrl, message);
+    fullMessage += await Promise.all(RegionInfo.regions.map(async (regionInfo) => {
+      let message = '';
+      const regionName = regionInfo.name;
+
+      //Regions to skip because they require special permissions
+      if(regionName.startsWith("af") || regionName.startsWith("ap-east-1") || regionName.startsWith("me") || regionName.startsWith("sa") 
+      || regionName.startsWith("cn") || regionName.startsWith("eu-south-1") || regionName.startsWith("us-gov") || regionName.startsWith("us-iso")
+      ){
+        return message;
+      }
+
+      if(!isRegionMatch(event, regionName)){
+        return message;
+      }
+
+      console.log(regionName);
+      message += `\n\n------${regionName}------\n`;
+
+      let managedEKSClusters: string[] = [];
+      let managedASGs: string[] = [];
+      let managedEC2Instances: string[] = [];
+      let managedRDS: string[] = [];
+
+      try{
+        managedEKSClusters = await manageEKSClusters(regionName);
+      }  catch (error) {
+        console.log(`Failed to manage eks clusters in region ${regionName}\n${error}`)
+      }
+
+      try{
+        managedASGs = await manageAutoScalingGroups(regionName);
+      }  catch (error) {
+        console.log(`Failed to manage ASGs in region ${regionName}\n${error}`)
+      }
+
+      try{
+        managedEC2Instances = await manageEC2(regionName);
+      }  catch (error) {
+        console.log(`Failed to manage EC2 in region ${regionName}\n${error}`)
+      }
+
+      try{
+        managedRDS = await manageRDS(regionName);
+      }  catch (error) {
+        console.log(`Failed to manage RDS in region ${regionName}\n${error}`)
+      }
+
+      message += 
+      `\n\tClusters managed ${managedEKSClusters}
+      \n\tASGs managed ${managedASGs}
+      \n\tEC2 Instances managed: ${managedEC2Instances}
+      \n\tRDS instances managed: ${managedRDS}`;
+
+      return message;
+    }));
+
+    // await postToSlack(slackUrl, message);
+
+    console.log(fullMessage);
 
     const response = {
       statusCode: 200,
-      body: JSON.stringify({message: message})
+      body: JSON.stringify({message: fullMessage})
     }
     return response;
   } catch (error) {
@@ -299,7 +424,7 @@ export const lambdaHandler = async (): Promise<APIGatewayProxyResult> => {
       statusCode: 500,
       body: "Failed to run lambda scaler"
     };
-    postToSlack(slackUrl, "Failed to run lambda scaler")
+    // postToSlack(slackUrl, "Failed to run lambda scaler")
     return response;
   }
 }
